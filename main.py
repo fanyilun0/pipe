@@ -11,6 +11,7 @@ BASE_URL = "https://pipe-network-backend.pipecanary.workers.dev/api"
 # 心跳和测试节点的间隔时间（单位：秒）
 HEARTBEAT_INTERVAL = 5 * 60  # 5分钟
 TEST_INTERVAL = 30 * 60  # 30分钟
+RETRY_DELAY = 5  # 重试延迟（秒）
 
 async def load_token():
     """从token.txt文件中加载token"""
@@ -20,25 +21,32 @@ async def load_token():
             return token
     except FileNotFoundError:
         logging.error("token.txt文件未找到")
-        return None
     except Exception as e:
         logging.error(f"从token.txt文件加载token时发生错误: {e}")
-        return None
+    return None
+
+async def get_ip():
+    """获取IP地址"""
+    async with aiohttp.ClientSession() as session:
+        for _ in range(3):  # 尝试三次获取IP
+            try:
+                async with session.get("https://api64.ipify.org?format=json", timeout=5) as ip_response:
+                    if ip_response.status == 200:
+                        ip_data = await ip_response.json()
+                        return ip_data.get('ip')
+            except Exception as e:
+                logging.error(f"获取IP失败，正在重试: {e}")
+            await asyncio.sleep(RETRY_DELAY)
+    logging.error("获取IP地址失败")
+    return None
 
 async def send_heartbeat(token, username):
     """发送心跳"""
     try:
-        # 获取IP地址
-        async with aiohttp.ClientSession() as session:
-            async with session.get("https://api64.ipify.org?format=json") as ip_response:
-                if ip_response.status == 200:
-                    ip_data = await ip_response.json()
-                    ip = ip_data.get('ip')
-                    logging.info(f"IP地址: {ip}")
-                else:
-                    logging.error(f"获取IP失败。状态: {ip_response.status}")
+        ip = await get_ip()
+        if not ip:
+            return
 
-        # 发送心跳
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
@@ -48,45 +56,61 @@ async def send_heartbeat(token, username):
             "ip": ip,
         }
         async with aiohttp.ClientSession() as session:
-            async with session.post(f"{BASE_URL}/heartbeat", headers=headers, json=data) as response:
-                if response.status == 200:
-                    logging.info("心跳发送成功")
-                else:
-                    logging.error(f"发送心跳失败。状态: {response.status}")
-    except aiohttp.ClientResponseError as e:
+            for _ in range(3):  # 尝试三次发送心跳
+                try:
+                    async with session.post(f"{BASE_URL}/heartbeat", headers=headers, json=data, timeout=5) as response:
+                        if response.status == 200:
+                            logging.info("心跳发送成功")
+                            return
+                        else:
+                            error_message = await response.text()
+                            logging.error(f"发送心跳失败。状态: {response.status}, 错误信息: {error_message}")
+                except Exception as e:
+                    logging.error(f"发送心跳时发生错误，正在重试: {e}")
+                await asyncio.sleep(RETRY_DELAY)
+        logging.error("心跳发送失败")
+    except Exception as e:
         logging.error(f"发送心跳时发生错误: {e}")
 
 async def fetch_points(token):
     """获取分数"""
     headers = {"Authorization": f"Bearer {token}"}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{BASE_URL}/points", headers=headers) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    points = data.get('points', None)
-                    return points
-                else:
-                    logging.error(f"获取分数时发生错误。状态: {response.status}")
-                    return None
-    except aiohttp.ClientResponseError as e:
-        logging.error(f"获取分数时发生错误: {e}")
-        return None
+    async with aiohttp.ClientSession() as session:
+        for _ in range(3):  # 尝试三次获取分数
+            try:
+                async with session.get(f"{BASE_URL}/points", headers=headers, timeout=5) as response:
+                    logging.info(f"获取分数响应状态: {response.status}")  # 增加日志记录
+                    if response.status == 200:
+                        data = await response.json()
+                        return data.get('points', None)
+                    else:
+                        error_message = await response.text()
+                        logging.error(f"获取分数失败。状态: {response.status}, 错误信息: {error_message}")
+            except Exception as e:
+                logging.error(f"获取分数时发生错误，正在重试: {e}")
+            await asyncio.sleep(RETRY_DELAY)
+    logging.error("获取分数失败")
+    return None
 
 async def start_testing(token):
     """开始测试节点"""
     logging.info("正在测试节点...")
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{BASE_URL}/nodes", headers={"Authorization": f"Bearer {token}"}) as response:
-                if response.status == 200:
-                    nodes = await response.json()
-                    for node in nodes:
-                        await test_node(token, node)
-                else:
-                    logging.error(f"获取节点信息时发生错误。状态: {response.status}")
-    except aiohttp.ClientResponseError as e:
-        logging.error(f"获取节点信息时发生错误: {e}")
+    async with aiohttp.ClientSession() as session:
+        for _ in range(3):  # 尝试三次获取节点信息
+            try:
+                async with session.get(f"{BASE_URL}/nodes", headers={"Authorization": f"Bearer {token}"}, timeout=5) as response:
+                    if response.status == 200:
+                        nodes = await response.json()
+                        tasks = [test_node(token, node) for node in nodes]
+                        await asyncio.gather(*tasks)
+                        return
+                    else:
+                        error_message = await response.text()
+                        logging.error(f"获取节点信息时发生错误。状态: {response.status}, 错误信息: {error_message}")
+            except Exception as e:
+                logging.error(f"获取节点信息时发生错误，正在重试: {e}")
+            await asyncio.sleep(RETRY_DELAY)
+        logging.error("获取节点信息失败")
 
 async def test_node(token, node):
     """测试单个节点"""
@@ -95,41 +119,53 @@ async def test_node(token, node):
         async with aiohttp.ClientSession() as session:
             async with session.get(f"http://{node['ip']}", timeout=10) as node_response:
                 latency = asyncio.get_event_loop().time() - start
-                if node_response.status == 200:
-                    logging.info(f"节点 {node['node_id']} 测试 ({node['ip']}) latency: {latency:.6f}ms")
-                    logging.info(f"报告节点结果 {node['node_id']}.")
-                    
-                    headers = {
-                        "Authorization": f"Bearer {token}",
-                        "Content-Type": "application/json",
-                    }
-                    test_data = {
-                        "node_id": node['node_id'],
-                        "latency": latency,
-                        "status": "online"
-                    }
-                    async with session.post(f"{BASE_URL}/test", headers=headers, json=test_data) as test_response:
-                        if test_response.status != 200:
-                            logging.error(f"Error")
-                else:
-                    logging.info(f"节点 {node['node_id']} 测试 ({node['ip']}) latency: -1ms")
-                    logging.info(f"报告节点结果 {node['node_id']}.")
-                    logging.error(f"节点 {node['ip']} 离线")
+                status = "online" if node_response.status == 200 else "offline"
+                latency_value = latency if status == "online" else -1
+                logging.info(f"节点 {node['node_id']} 测试 ({node['ip']}) latency: {latency_value:.6f}ms, status: {status}")
+                await report_node_result(token, node['node_id'], latency_value, status)
     except (asyncio.TimeoutError, aiohttp.ClientConnectorError) as e:
-        logging.info(f"节点 {node['node_id']} 测试 ({node['ip']}) latency: -1ms")
-        logging.info(f"报告节点结果 {node['node_id']}.")
+        logging.info(f"节点 {node['node_id']} 测试 ({node['ip']}) latency: -1ms, status: offline")
         logging.error(f"测试节点 {node['ip']} 时发生错误: {e}")
+        await report_node_result(token, node['node_id'], -1, "offline")
+
+async def report_node_result(token, node_id, latency, status):
+    """报告节点测试结果"""
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    test_data = {
+        "node_id": node_id,
+        "latency": latency,
+        "status": status
+    }
+    async with aiohttp.ClientSession() as session:
+        for _ in range(3):  # 尝试三次报告节点结果
+            try:
+                async with session.post(f"{BASE_URL}/test", headers=headers, json=test_data, timeout=5) as test_response:
+                    if test_response.status != 200:
+                        error_message = await test_response.text()
+                        logging.error(f"报告节点 {node_id} 结果失败。状态: {test_response.status}, 错误信息: {error_message}")
+                    else:
+                        logging.info(f"节点 {node_id} 结果报告成功")
+                    return
+            except Exception as e:
+                logging.error(f"报告节点 {node_id} 结果时发生错误，正在重试: {e}")
+            await asyncio.sleep(RETRY_DELAY)
+        logging.error(f"报告节点 {node_id} 结果失败")
 
 async def main():
     print("""
 *****************************************************
-*           X:https://x.com/ferdie_jhovie         *
+*           X:https://x.com/ferdie_jhovie           *
 *           Tg:https://t.me/sdohuajia               *
 *****************************************************
 """)
+    
     token = await load_token()
     if token:
         logging.info("Token加载成功!")
+        
         current_points = await fetch_points(token)
         logging.info(f"当前分数: {current_points}")
         
@@ -152,7 +188,7 @@ async def main():
                 if current_points is not None:
                     logging.info(f"测试节点循环完成后当前分数: {current_points}")
                 else:
-                    logging.error(f"获取分数失败")
+                    logging.error("获取分数失败")
                 next_test_time = current_time + timedelta(seconds=TEST_INTERVAL)
             
             # 等待下一个事件触发
