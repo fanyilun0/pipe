@@ -178,12 +178,16 @@ async def main():
     
     next_heartbeat_time = datetime.now()
     next_test_time = datetime.now()
+    first_heartbeat = True  # 添加标志位跟踪首次心跳
     
     while True:
         current_time = datetime.now()
         
         # 发送心跳
         if current_time >= next_heartbeat_time:
+            if first_heartbeat:
+                logging.info("发送心跳...")
+                first_heartbeat = False
             await send_heartbeat(token, "用户名")  # 替换为实际用户名
             next_heartbeat_time = current_time + timedelta(seconds=HEARTBEAT_INTERVAL)
         
