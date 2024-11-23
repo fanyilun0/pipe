@@ -3,12 +3,15 @@ import json
 import aiohttp
 import asyncio
 from datetime import datetime, timedelta
+import sys
 
 # ANSI 转义序列
 class Colors:
     GREEN = "\033[92m"
     RED = "\033[91m"
     RESET = "\033[0m"
+    CYAN = "\033[96m"
+    WHITE = "\033[97m"
 
 # 基础配置
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -44,7 +47,7 @@ async def get_ip():
             await asyncio.sleep(RETRY_DELAY)
     return None
 
-async def send_heartbeat(token, username):
+async def send_heartbeat(token):
     """发送心跳信号"""
     ip = await get_ip()
     if not ip:
@@ -54,10 +57,7 @@ async def send_heartbeat(token, username):
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
-    data = {
-        "username": username,
-        "ip": ip,
-    }
+    data = {"ip": ip}
     
     async with aiohttp.ClientSession() as session:
         try:
@@ -150,14 +150,75 @@ async def start_testing(token):
         except Exception as e:
             logging.error(f"获取节点信息时发生错误: {e}")
 
-async def main():
-    print("""
-*****************************************************
-*           X:https://x.com/ferdie_jhovie           *
-*           Tg:https://t.me/sdohuajia               *
-*****************************************************
-""")
+async def register_account():
+    """注册新账户"""
+    print("\n=== 账户注册 ===")
+    email = input("请输入邮箱: ")
+    password = input("请输入密码: ")
+    invite_code = input("请输入邀请码: ")
     
+    # 进行注册
+    async with aiohttp.ClientSession() as session:
+        try:
+            data = {
+                "email": email,
+                "password": password,
+                "invite_code": invite_code
+            }
+            async with session.post(f"{BASE_URL}/signup", json=data, timeout=5) as response:
+                if response.status in [200, 201]:
+                    result = await response.json()
+                    token = result.get('token')
+                    print(f"\n注册成功！")
+                    print(f"您的token是: {token}")
+                    print("请保存此信息到register.txt文件中")
+                    
+                    # 可选：自动保存注册信息到文件
+                    save = input("\n是否自动保存注册信息到register.txt？(y/n): ")
+                    if save.lower() == 'y':
+                        try:
+                            with open('register.txt', 'w') as f:
+                                f.write(f"Email: {email}\n")
+                                f.write(f"Password: {password}\n")
+                                f.write(f"Token: {token}\n")
+                            print("注册信息已成功保存到register.txt")
+                            print("如需运行节点，请将token复制到token.txt文件中")
+                        except Exception as e:
+                            print(f"保存注册信息时发生错误: {e}")
+                            print("请手动保存注册信息")
+                    return
+                error_message = await response.text()
+                logging.error(f"注册失败。状态: {response.status}, 错误信息: {error_message}")
+        except Exception as e:
+            logging.error(f"注册过程中发生错误: {e}")
+
+async def display_menu():
+    """显示主菜单"""
+    while True:
+        print("\n" + "="*50)
+        print(f"{Colors.CYAN}*X:https://x.com/ferdie_jhovie*")
+        print(f"首发pipe network脚本，盗脚本可耻，请标注出处")
+        print(f"*Tg:https://t.me/sdohuajia*{Colors.RESET}")
+        print("="*50)
+        print(f"\n{Colors.CYAN}请选择功能:{Colors.RESET}")
+        print(f"{Colors.WHITE}1. 运行节点{Colors.RESET}")
+        print(f"{Colors.WHITE}2. 注册账户{Colors.RESET}")
+        print(f"{Colors.WHITE}3. 退出程序\n{Colors.RESET}")
+        
+        choice = input("请输入选项 (1-3): ")
+        
+        if choice == "1":
+            await run_node()
+        elif choice == "2":
+            await register_account()
+        elif choice == "3":
+            print("\n感谢使用，再见！")
+            sys.exit(0)
+        else:
+            print("\n无效选项，请重试")
+
+async def run_node():
+    """运行节点测试"""
     token = await load_token()
     if not token:
         logging.error("无法加载token。请确保token.txt文件存在且包含有效的token。")
@@ -165,7 +226,6 @@ async def main():
 
     logging.info("Token加载成功!")
     
-    # 初始显示分数
     current_points = await fetch_points(token)
     if current_points is not None:
         print(f"{Colors.GREEN}当前分数: {current_points}{Colors.RESET}")
@@ -174,26 +234,41 @@ async def main():
     next_test_time = datetime.now()
     first_heartbeat = True
     
-    while True:
-        current_time = datetime.now()
-        
-        # 发送心跳
-        if current_time >= next_heartbeat_time:
-            if first_heartbeat:
-                logging.info("开始首次心跳...")
-                first_heartbeat = False
-            await send_heartbeat(token, "用户名")  # 替换为实际用户名
-            next_heartbeat_time = current_time + timedelta(seconds=HEARTBEAT_INTERVAL)
-        
-        # 测试节点
-        if current_time >= next_test_time:
-            await start_testing(token)
-            current_points = await fetch_points(token)
-            if current_points is not None:
-                print(f"{Colors.GREEN}测试节点循环完成后当前分数: {current_points}{Colors.RESET}")
-            next_test_time = current_time + timedelta(seconds=TEST_INTERVAL)
-        
-        await asyncio.sleep(1)
+    try:
+        while True:
+            current_time = datetime.now()
+            
+            if current_time >= next_heartbeat_time:
+                if first_heartbeat:
+                    logging.info("开始首次心跳...")
+                    first_heartbeat = False
+                await send_heartbeat(token)
+                next_heartbeat_time = current_time + timedelta(seconds=HEARTBEAT_INTERVAL)
+            
+            if current_time >= next_test_time:
+                await start_testing(token)
+                current_points = await fetch_points(token)
+                if current_points is not None:
+                    print(f"{Colors.GREEN}测试节点循环完成后当前分数: {current_points}{Colors.RESET}")
+                next_test_time = current_time + timedelta(seconds=TEST_INTERVAL)
+            
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        print("\n返回主菜单...")
+
+async def main():
+    print("""
+*****************************************************
+*           X:https://x.com/ferdie_jhovie           *
+*           Tg:https://t.me/sdohuajia               *
+*****************************************************
+""")
+    
+    await display_menu()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n程序已退出")
+        sys.exit(0)
